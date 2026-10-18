@@ -53,6 +53,7 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
     private var burstRunId=""
     private var burstResult:TotalCaptureResult?=null
     private var burstJpg:Image?=null
+    private var burstWaitingForImage=false
 
     fun limits():Pair<LongRange,IntRange>? {
         val c=characteristics?:return null
@@ -230,6 +231,7 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
         burstRunId=SimpleDateFormat("yyyyMMdd_HHmmss",Locale.US).format(Date())
         burstResult=null
         burstJpg?.close();burstJpg=null
+        burstWaitingForImage=false
         try{
             sess.stopRepeating()
             notify("JPG-SERIE $count × "+String.format(Locale.GERMANY,"%.3f",seconds)+
@@ -264,6 +266,8 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
             b.set(CaptureRequest.JPEG_QUALITY,95.toByte())
             burstResult=null
             burstJpg?.close();burstJpg=null
+            burstWaitingForImage=true
+            val expectedIndex=burstCompleted+1
             sess.capture(b.build(),object:CameraCaptureSession.CaptureCallback(){
                 override fun onCaptureCompleted(s:CameraCaptureSession,r:CaptureRequest,result:TotalCaptureResult){
                     if(!burstActive)return
@@ -275,8 +279,8 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
                 }
             },handler)
             handler.postDelayed({
-                if(burstActive && burstResult==null && burstJpg==null){
-                    stopBurst("Zeitüberschreitung beim Kameraframe; $burstCompleted Bilder gespeichert.")
+                if(burstActive && burstCompleted<expectedIndex && burstWaitingForImage){
+                    stopBurst("Zeitüberschreitung bei Bild $expectedIndex; $burstCompleted Bilder gespeichert.")
                 }
             },8000)
         }catch(e:Exception){stopBurst("Serienaufnahme fehlgeschlagen: ${e.message}")}
@@ -286,6 +290,7 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
         if(!burstActive)return
         val result=burstResult?:return
         val image=burstJpg?:return
+        burstWaitingForImage=false
         burstResult=null
         burstJpg=null
         val index=burstCompleted+1
@@ -327,6 +332,7 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
         if(!burstActive)return
         burstActive=false
         busy=false
+        burstWaitingForImage=false
         burstResult=null
         burstJpg?.close();burstJpg=null
         resumePreview()
@@ -507,6 +513,7 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
     }
     fun close(){
         burstActive=false
+        burstWaitingForImage=false
         burstResult=null
         burstJpg?.close();burstJpg=null
         try{session?.close()}catch(_:Exception){}
