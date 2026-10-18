@@ -44,6 +44,16 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
     private var autoExposure=false
     private var requestedAtMs=0L
 
+    // v0.1.5: proof-of-concept serial JPG bursts, NO stacking or synthetic light added.
+    private var burstActive=false
+    private var burstTarget=0
+    private var burstCompleted=0
+    private var burstIso=0
+    private var burstExposureNs=0L
+    private var burstRunId=""
+    private var burstResult:TotalCaptureResult?=null
+    private var burstJpg:Image?=null
+
     fun limits():Pair<LongRange,IntRange>? {
         val c=characteristics?:return null
         val exposure=c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?:return null
@@ -191,6 +201,138 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
     fun shoot(iso:Int,seconds:Double)=capture(iso,seconds,false)
     fun shootAuto()=capture(400,0.0,true)
 
+
+    /** Serial short-exposure trial. JPEG-only by design; RAW series requires separate validation. */
+    fun startBurst(count:Int,iso:Int,seconds:Double){
+        val ch=characteristics?:return notify("Hardwarecheck zuerst öffnen.")
+        val camera=device?:return notify("Kamera nicht bereit.")
+        val sess=session?:return notify("Kamera-Session nicht bereit.")
+        if(busy||burstActive)return notify("Schon eine Aufnahme aktiv.")
+        if(count !in 2..30)return notify("Serienlänge nicht erlaubt.")
+        val capabilities=ch.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?:intArrayOf()
+        if(!capabilities.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)){
+            notify("Manuelle Belichtung wird nicht unterstützt.");return
+        }
+        val range=ch.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+            ?:return notify("Belichtungsgrenzen fehlen.")
+        val isoRange=ch.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+            ?:return notify("ISO-Grenzen fehlen.")
+        val exposureNs=(seconds*1e9).toLong()
+        if(exposureNs !in range.lower..range.upper||iso !in isoRange.lower..isoRange.upper){
+            notify("Serienwerte außerhalb der Hardware-Grenzen. Nicht ausgelöst.");return
+        }
+        burstActive=true
+        busy=true
+        burstCompleted=0
+        burstTarget=count
+        burstIso=iso
+        burstExposureNs=exposureNs
+        burstRunId=SimpleDateFormat("yyyyMMdd_HHmmss",Locale.US).format(Date())
+        burstResult=null
+        burstJpg?.close();burstJpg=null
+        try{
+            sess.stopRepeating()
+            notify("JPG-SERIE $count × "+String.format(Locale.GERMANY,"%.3f",seconds)+
+                " s / ISO $iso. Gerät absolut ruhig halten. Noch KEIN Stacking.")
+            handler.post{captureBurstFrame()}
+        }catch(e:Exception){stopBurst("Serienstart fehlgeschlagen: ${e.message}")}
+    }
+
+    fun cancelBurst(){
+        if(!burstActive)return notify("Keine Serie aktiv.")
+        stopBurst("Serie abgebrochen. $burstCompleted/$burstTarget JPGs gespeichert.")
+    }
+
+    private fun captureBurstFrame(){
+        if(!burstActive)return
+        val cam=device?:return stopBurst("Kamera getrennt.")
+        val sess=session?:return stopBurst("Camera2-Session geschlossen.")
+        val ch=characteristics?:return stopBurst("Kein Hardwareprofil.")
+        try{
+            val b=cam.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+            b.addTarget(jpeg?.surface?:return stopBurst("JPEG-Stream nicht verfügbar."))
+            b.set(CaptureRequest.CONTROL_MODE,CaptureRequest.CONTROL_MODE_AUTO)
+            b.set(CaptureRequest.CONTROL_AE_MODE,CaptureRequest.CONTROL_AE_MODE_OFF)
+            b.set(CaptureRequest.CONTROL_AF_MODE,CaptureRequest.CONTROL_AF_MODE_OFF)
+            if((ch.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)?:0f)>0f){
+                b.set(CaptureRequest.LENS_FOCUS_DISTANCE,0f)
+            }
+            b.set(CaptureRequest.CONTROL_AWB_MODE,CaptureRequest.CONTROL_AWB_MODE_AUTO)
+            b.set(CaptureRequest.SENSOR_EXPOSURE_TIME,burstExposureNs)
+            b.set(CaptureRequest.SENSOR_SENSITIVITY,burstIso)
+            b.set(CaptureRequest.JPEG_ORIENTATION,jpegOrientation(ch))
+            b.set(CaptureRequest.JPEG_QUALITY,95.toByte())
+            burstResult=null
+            burstJpg?.close();burstJpg=null
+            sess.capture(b.build(),object:CameraCaptureSession.CaptureCallback(){
+                override fun onCaptureCompleted(s:CameraCaptureSession,r:CaptureRequest,result:TotalCaptureResult){
+                    if(!burstActive)return
+                    burstResult=result
+                    finishBurstFrameIfReady()
+                }
+                override fun onCaptureFailed(s:CameraCaptureSession,r:CaptureRequest,f:CaptureFailure){
+                    stopBurst("Serie abgebrochen: Camera2 Fehler ${f.reason}. $burstCompleted Bilder gespeichert.")
+                }
+            },handler)
+            handler.postDelayed({
+                if(burstActive && burstResult==null && burstJpg==null){
+                    stopBurst("Zeitüberschreitung beim Kameraframe; $burstCompleted Bilder gespeichert.")
+                }
+            },8000)
+        }catch(e:Exception){stopBurst("Serienaufnahme fehlgeschlagen: ${e.message}")}
+    }
+
+    private fun finishBurstFrameIfReady(){
+        if(!burstActive)return
+        val result=burstResult?:return
+        val image=burstJpg?:return
+        burstResult=null
+        burstJpg=null
+        val index=burstCompleted+1
+        val actualNs=result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
+        val actualIso=result.get(CaptureResult.SENSOR_SENSITIVITY)
+        val bytes=try{
+            val buffer=image.planes[0].buffer
+            ByteArray(buffer.remaining()).also{buffer.get(it)}
+        }catch(e:Exception){
+            image.close()
+            stopBurst("JPG-Daten fehlerhaft: ${e.message}")
+            return
+        }
+        image.close()
+        Thread{
+            try{
+                val name=String.format(Locale.US,"frame_%03d_%dms_iso%d.jpg",
+                    index,(actualNs?:0L)/1000000L,actualIso?:0)
+                save(name,"image/jpeg","Pictures/MUNIVERSE/Burst_"+burstRunId){stream->stream.write(bytes)}
+                handler.post{
+                    if(!burstActive)return@post
+                    burstCompleted=index
+                    notify("SERIE: $burstCompleted/$burstTarget gespeichert. Sensor: "+
+                        String.format(Locale.GERMANY,"%.3f",(actualNs?:0L)/1e9)+
+                        " s / ISO "+(actualIso?.toString()?:"?"))
+                    if(burstCompleted>=burstTarget){
+                        stopBurst("$burstCompleted/$burstTarget"+
+                            " JPGs gespeichert in Pictures/MUNIVERSE/Burst_"+burstRunId+
+                            "\nOriginale unverändert, noch NICHT gestackt.")
+                    }else captureBurstFrame()
+                }
+            }catch(e:Exception){
+                handler.post{stopBurst("Speicherfehler bei Frame $index: ${e.message}. $burstCompleted gesichert.")}
+            }
+        }.start()
+    }
+
+    private fun stopBurst(message:String){
+        if(!burstActive)return
+        burstActive=false
+        busy=false
+        burstResult=null
+        burstJpg?.close();burstJpg=null
+        resumePreview()
+        notify(message)
+    }
+
     private fun resumePreview(){
         val cam=device?:return
         val sess=session?:return
@@ -300,6 +442,13 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
 
     private fun storeImage(image:Image?,isRaw:Boolean){
         if(image==null)return
+        if(burstActive){
+            if(isRaw){image.close();return}
+            burstJpg?.close()
+            burstJpg=image
+            finishBurstFrameIfReady()
+            return
+        }
         if(!busy){image.close();return}
         if(isRaw){imageRaw?.close();imageRaw=image}else{imageJpg?.close();imageJpg=image}
         trySave()
@@ -340,10 +489,13 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
         }.start()
     }
     private fun save(filename:String,mime:String,write:(java.io.OutputStream)->Unit){
+        save(filename,mime,"Pictures/MUNIVERSE",write)
+    }
+    private fun save(filename:String,mime:String,relativePath:String,write:(java.io.OutputStream)->Unit){
         val values=ContentValues().apply{
             put(MediaStore.Images.Media.DISPLAY_NAME,"MUNIVERSE_"+filename)
             put(MediaStore.Images.Media.MIME_TYPE,mime)
-            put(MediaStore.Images.Media.RELATIVE_PATH,"Pictures/MUNIVERSE")
+            put(MediaStore.Images.Media.RELATIVE_PATH,relativePath)
             put(MediaStore.Images.Media.IS_PENDING,1)
         }
         val uri=activity.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,values)?:error("MediaStore insert")
@@ -354,6 +506,9 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
         }catch(e:Exception){activity.contentResolver.delete(uri,null,null);throw e}
     }
     fun close(){
+        burstActive=false
+        burstResult=null
+        burstJpg?.close();burstJpg=null
         try{session?.close()}catch(_:Exception){}
         try{device?.close()}catch(_:Exception){}
         try{surface?.release()}catch(_:Exception){}
