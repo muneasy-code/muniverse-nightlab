@@ -5,6 +5,8 @@ import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.net.Uri
 import android.provider.MediaStore
 import java.text.SimpleDateFormat
@@ -20,7 +22,10 @@ import kotlin.math.roundToInt
  * Never adds points of light and never changes or deletes its source images.
  */
 object StackLab {
-    data class Output(val uri: Uri, val count: Int, val width: Int, val height: Int, val shifts: String)
+    data class Output(
+        val uri: Uri, val count: Int, val width: Int, val height: Int, val shifts: String,
+        val clippedPercent: Double, val unreliableAlignments: Int
+    )
 
     /**
      * Discover the most recent camera-generated BURST folder.
@@ -73,6 +78,12 @@ object StackLab {
         val blue=IntArray(length)
         val counts=ByteArray(length)
         val lumaBase=byteLuma(source)
+        val clipped=source.count { p ->
+            ((p shr 16) and 255)>=251 && ((p shr 8) and 255)>=251 && (p and 255)>=251
+        }
+        val clippedPercent=100.0*clipped/length
+        if(clippedPercent>5.0)progress("WARNUNG: ${"%.1f".format(Locale.GERMANY,clippedPercent)} % Ausgangspixel sind fast weiß. Bereits überbelichtete Details lassen sich nicht wiederherstellen.")
+        var unreliableAlignments=0
         for(i in 0 until length){
             val p=source[i]
             red[i]=(p shr 16) and 255
@@ -89,8 +100,11 @@ object StackLab {
             val pix=IntArray(length)
             bmp.getPixels(pix,0,w,0,0,w,h)
             bmp.recycle()
-            val (dx,dy)=shift(lumaBase,byteLuma(pix),featurePoints,w,h)
-            shifts.add("$dx,$dy")
+            val aligned=shift(lumaBase,byteLuma(pix),featurePoints,w,h)
+            val dx=aligned.first
+            val dy=aligned.second
+            if(!aligned.third)unreliableAlignments++
+            shifts.add("$dx,$dy"+if(aligned.third)"" else " (nicht zuverlässig)")
             // Translate source into reference coordinates. Never interpolate / generate detail.
             for(y in max(0,-dy) until minOf(h,h-dy)){
                 val sy=y+dy
@@ -135,14 +149,26 @@ object StackLab {
             context.contentResolver.delete(uri,null,null)
             throw e
         }finally{bitmap.recycle()}
-        return Output(uri,input.size,w,h,shifts.joinToString(" | "))
+        return Output(uri,input.size,w,h,shifts.joinToString(" | "),clippedPercent,unreliableAlignments)
     }
 
-    private fun decodeSmall(context:Context, uri:Uri, targetW:Int=0,targetH:Int=0):Bitmap {
+    /**
+     * BitmapFactory does not honor JPEG EXIF orientation. Normalize captured frames
+     * before alignment and export, without altering the source JPEG or its metadata.
+     */
+    private fun decodeSmall(context:Context,uri:Uri,targetW:Int=0,targetH:Int=0):Bitmap{
+        val orientation=try{
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                ExifInterface(input).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,ExifInterface.ORIENTATION_NORMAL
+                )
+            }?:ExifInterface.ORIENTATION_NORMAL
+        }catch(_:Exception){ExifInterface.ORIENTATION_NORMAL}
         val bounds=BitmapFactory.Options().apply{inJustDecodeBounds=true}
-        val inspect=context.contentResolver.openInputStream(uri)?:error("JPG-Datei nicht lesbar")
-        inspect.use{BitmapFactory.decodeStream(it,null,bounds)}
-        require(bounds.outWidth>0 && bounds.outHeight>0){"Datei ist kein dekodierbares Foto."}
+        context.contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it,null,bounds)
+        }?:error("JPG-Datei nicht lesbar")
+        require(bounds.outWidth>0 && bounds.outHeight>0){"Keine dekodierbaren Bilddaten."}
         val maxSide=1600
         var factor=1
         while(max(bounds.outWidth,bounds.outHeight)/factor>maxSide*1.6)factor*=2
@@ -150,19 +176,34 @@ object StackLab {
             inSampleSize=factor
             inPreferredConfig=Bitmap.Config.ARGB_8888
         }
-        val decoded=context.contentResolver.openInputStream(uri)?.use{
+        val decoded=context.contentResolver.openInputStream(uri)?.use {
             BitmapFactory.decodeStream(it,null,settings)
-        }?:error("JPG-Dekodierung fehlgeschlagen")
-        val outW=if(targetW>0)targetW else (decoded.width*minOf(1.0,maxSide.toDouble()/max(decoded.width,decoded.height))).roundToInt().coerceAtLeast(1)
-        val outH=if(targetH>0)targetH else (decoded.height*minOf(1.0,maxSide.toDouble()/max(decoded.width,decoded.height))).roundToInt().coerceAtLeast(1)
-        // Reject differently oriented frames, do not geometrically warp a scene to fit.
-        if(targetW>0 && abs(decoded.width.toDouble()/decoded.height-targetW.toDouble()/targetH)>0.02){
-            decoded.recycle()
-            error("Bilder haben unterschiedliche Formate/Ausrichtung.")
+        }?:error("JPG-Dekodierung fehlgeschlagen.")
+        val matrix=Matrix()
+        when(orientation){
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL->matrix.postScale(-1f,1f)
+            ExifInterface.ORIENTATION_ROTATE_180->matrix.postRotate(180f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL->matrix.postScale(1f,-1f)
+            ExifInterface.ORIENTATION_TRANSPOSE->{matrix.postRotate(90f);matrix.postScale(-1f,1f)}
+            ExifInterface.ORIENTATION_ROTATE_90->matrix.postRotate(90f)
+            ExifInterface.ORIENTATION_TRANSVERSE->{matrix.postRotate(270f);matrix.postScale(-1f,1f)}
+            ExifInterface.ORIENTATION_ROTATE_270->matrix.postRotate(270f)
         }
-        if(decoded.width==outW && decoded.height==outH)return decoded
-        val resized=Bitmap.createScaledBitmap(decoded,outW,outH,true)
-        decoded.recycle()
+        val upright=if(matrix.isIdentity)decoded else {
+            val rotated=Bitmap.createBitmap(decoded,0,0,decoded.width,decoded.height,matrix,true)
+            if(rotated!==decoded)decoded.recycle()
+            rotated
+        }
+        val scale=minOf(1.0,maxSide.toDouble()/max(upright.width,upright.height))
+        val outW=if(targetW>0)targetW else (upright.width*scale).roundToInt().coerceAtLeast(1)
+        val outH=if(targetH>0)targetH else (upright.height*scale).roundToInt().coerceAtLeast(1)
+        if(targetW>0 && abs(upright.width.toDouble()/upright.height-targetW.toDouble()/targetH)>0.02){
+            upright.recycle()
+            error("Einzelbilder haben unterschiedliche Formate/Ausrichtungen.")
+        }
+        if(upright.width==outW && upright.height==outH)return upright
+        val resized=Bitmap.createScaledBitmap(upright,outW,outH,true)
+        upright.recycle()
         return resized
     }
 
@@ -190,33 +231,42 @@ object StackLab {
         return selected.sortedByDescending{it.second}.take(1100).map{it.first}
     }
 
-    private fun shift(reference:ByteArray,other:ByteArray,features:List<Int>,w:Int,h:Int):Pair<Int,Int> {
-        // No reliable features: do not invent an alignment.
-        if(features.size<35)return 0 to 0
+    private fun shift(reference:ByteArray,other:ByteArray,features:List<Int>,w:Int,h:Int):Triple<Int,Int,Boolean>{
+        // Without enough stable image features, the safest honest choice is no shift.
+        if(features.size<60)return Triple(0,0,false)
         var bestScore=Double.POSITIVE_INFINITY
         var bestDx=0;var bestDy=0
         var zeroScore=Double.POSITIVE_INFINITY
-        for(dy in -8..8){
-            for(dx in -8..8){
+        val maxShift=8
+        for(dy in -maxShift..maxShift){
+            for(dx in -maxShift..maxShift){
                 var total=0L
                 var valid=0
                 for(p in features){
                     val x=p%w
                     val y=p/w
                     if(x+dx !in 0 until w || y+dy !in 0 until h)continue
-                    val ref=reference[p].toInt() and 255
-                    val obs=other[(y+dy)*w+x+dx].toInt() and 255
-                    total+=abs(ref-obs)
+                    val a=reference[p].toInt() and 255
+                    val b=other[(y+dy)*w+x+dx].toInt() and 255
+                    // Saturated regions are useless for estimating image translation.
+                    if(a>=250||b>=250)continue
+                    total+=abs(a-b)
                     valid++
                 }
-                if(valid==0)continue
+                if(valid<features.size/3)continue
                 val avg=total.toDouble()/valid
                 if(dx==0&&dy==0)zeroScore=avg
-                if(avg<bestScore){bestScore=avg;bestDx=dx;bestDy=dy}
+                if(avg<bestScore){
+                    bestScore=avg;bestDx=dx;bestDy=dy
+                }
             }
         }
-        // Only shift for a meaningful improvement; avoids aligning random sensor noise.
-        if(bestScore>=zeroScore*0.94)return 0 to 0
-        return bestDx to bestDy
+        // If optimum touches search edge, the true displacement is unknown.
+        // Or noise can create an apparent alignment: reject weak improvements.
+        val confident=bestDx!=maxShift && bestDx != -maxShift &&
+            bestDy!=maxShift && bestDy != -maxShift &&
+            bestScore.isFinite() && zeroScore.isFinite() &&
+            bestScore<zeroScore*0.83 && (zeroScore-bestScore)>2.0
+        return if(confident)Triple(bestDx,bestDy,true) else Triple(0,0,false)
     }
 }
