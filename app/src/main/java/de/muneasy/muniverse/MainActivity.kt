@@ -212,10 +212,23 @@ class MainActivity:Activity(){
                     if(checkSelfPermission(Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED)camera.shoot(iso,seconds)
                     else requestPermissions(arrayOf(Manifest.permission.CAMERA),100)
                 }
+                label("✦ BURST LAB · VERSUCHSREIHE",18f,cyan)
+                label("Sammelt mehrere echte JPG-Einzelbilder. Noch kein fertiges Stacking! Originale liegen anschließend in Pictures/MUNIVERSE/Burst_…",13f,muted)
+                button("TEST-SERIE · 10 × 0,10 s / ISO 800"){
+                    if(checkSelfPermission(Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED)
+                        camera.startBurst(10,800,0.10)
+                    else requestPermissions(arrayOf(Manifest.permission.CAMERA),100)
+                }
+                button("ASTRO-SERIE · 20 × 0,15 s / ISO 3200"){
+                    if(checkSelfPermission(Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED)
+                        camera.startBurst(20,3200,0.15)
+                    else requestPermissions(arrayOf(Manifest.permission.CAMERA),100)
+                }
+                button("SERIE ABBRECHEN"){camera.cancelBurst()}
                 if(checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED){
                     button("Kameraberechtigung erteilen"){requestPermissions(arrayOf(Manifest.permission.CAMERA),100)}
                 }
-                label("Camera2-Einzelaufnahme: Die Sensorwerte nach dem Auslösen mit dem Wunschwert vergleichen. 0,15 s sind KEINE Expert-RAW-Langzeitbelichtung. Für schwache Sterne brauchen wir später Mehrfachaufnahmen mit Stacking.",13f,muted)
+                label("10 × 0,10 s = 1 s aufsummierte Sensor-Belichtungszeit, 20 × 0,15 s = 3 s; die Gesamtaufnahme dauert länger. Nur JPEG-Testserien, keine RAW-Stacks und keine künstlich ergänzten Sterne.",13f,muted)
             }
         }
     }
