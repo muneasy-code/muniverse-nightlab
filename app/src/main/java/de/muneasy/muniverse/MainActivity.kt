@@ -166,7 +166,7 @@ class MainActivity:Activity(){
             "stack"->{
                 title("✦ STACK LAB · ECHTE PIXEL")
                 label("10 echte JPGs → Ausrichten → Mittelwert bilden. Keine generative KI, keine künstlichen Sterne. Alle Originale bleiben unverändert.",14f,muted)
-                label("Experimentelle Vorschau: Der PNG-Stack wird auf maximal 1600 px verkleinert, um RAM und Akku zu schonen. Sensor-JPGs werden nicht nachträglich aufgehellt.",13f,muted)
+                label("v0.1.7: Bildausrichtung aus Original-JPG-EXIF beachten. Fragliche Pixelverschiebungen werden verworfen; überbelichtete Stellen können nicht repariert werden. Export bis 1600 px.",13f,muted)
                 button("LETZTE BURST-SERIE STACKEN"){
                     if(stacking)return@button
                     Thread {
@@ -248,8 +248,13 @@ class MainActivity:Activity(){
                     else requestPermissions(arrayOf(Manifest.permission.CAMERA),100)
                 }
                 label("✦ BURST LAB · VERSUCHSREIHE",18f,cyan)
-                label("Sammelt mehrere echte JPG-Einzelbilder. Noch kein fertiges Stacking! Originale liegen anschließend in Pictures/MUNIVERSE/Burst_…",13f,muted)
-                button("TEST-SERIE · 10 × 0,10 s / ISO 800"){
+                label("Für Tageslicht kürzere Belichtungen und niedrige ISO wählen. Sonst sind helle Bereiche bereits im Original unwiederbringlich weiß.",13f,muted)
+                button("TAG-TEST · 10 × 0,005 s / ISO 100"){
+                    if(checkSelfPermission(Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED)
+                        camera.startBurst(10,100,0.005)
+                    else requestPermissions(arrayOf(Manifest.permission.CAMERA),100)
+                }
+                button("DUNKLES ZIMMER · 10 × 0,10 s / ISO 800"){
                     if(checkSelfPermission(Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED)
                         camera.startBurst(10,800,0.10)
                     else requestPermissions(arrayOf(Manifest.permission.CAMERA),100)
@@ -263,7 +268,7 @@ class MainActivity:Activity(){
                 if(checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED){
                     button("Kameraberechtigung erteilen"){requestPermissions(arrayOf(Manifest.permission.CAMERA),100)}
                 }
-                label("10 × 0,10 s = 1 s aufsummierte Sensor-Belichtungszeit, 20 × 0,15 s = 3 s; die Gesamtaufnahme dauert länger. Nur JPEG-Testserien, keine RAW-Stacks und keine künstlich ergänzten Sterne.",13f,muted)
+                label("Die Serie speichert JPG-Einzelbilder für lokales Stacking. 10 × 0,10 s = 1 s aufsummierte Sensor-Belichtungszeit, kein Ersatz für Expert RAW. Tageslicht-Voreinstellung zuerst im Hellen testen.",13f,muted)
             }
         }
     }
@@ -280,7 +285,9 @@ class MainActivity:Activity(){
                     stacking=false
                     stackStatus?.text="FERTIG: ${result.count} Bilder kombiniert (PNG ${result.width} × ${result.height})." +
                         "\nGespeichert unter Bilder → MUNIVERSE → Stacks." +
-                        "\nErkannte Bildverschiebungen: ${result.shifts}" +
+                        "\nAusrichtungen: ${result.shifts}" +
+                        (if(result.unreliableAlignments>0) "\nHinweis: ${result.unreliableAlignments} unsichere Ausrichtungen wurden nicht angewandt." else "") +
+                        (if(result.clippedPercent>5.0) "\nWARNUNG: ${String.format(Locale.GERMANY,"%.1f",result.clippedPercent)} % der Ausgangspixel fast weiß; Details sind bereits überbelichtet." else "") +
                         "\nOhne generative KI. Original-JPGs nicht verändert."
                     Toast.makeText(this,"MUNIVERSE STACK gespeichert!",Toast.LENGTH_LONG).show()
                 }
