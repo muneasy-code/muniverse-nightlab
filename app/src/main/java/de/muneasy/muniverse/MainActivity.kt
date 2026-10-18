@@ -7,7 +7,7 @@ import android.content.Context
 import android.graphics.Color
 import android.os.Bundle
 import android.view.Gravity
-import android.view.SurfaceTexture
+import android.graphics.SurfaceTexture
 import android.view.TextureView
 import android.view.View
 import android.widget.*
