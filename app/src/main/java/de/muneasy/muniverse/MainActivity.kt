@@ -178,7 +178,12 @@ class MainActivity:Activity(){
             }
             "camera"->{
                 title("ASTROCAM · CAMERA2")
-                label("Alpha-Test: feste Unterlage nutzen. Erst 1–2 Sekunden testen!")
+                label("v0.1.2: Wir messen jetzt die ECHTE Belichtungszeit des Sensors. Erst AUTO-TEST machen!",14f,muted)
+                button("AUTO-TEST · helles Zimmer fotografieren"){
+                    if(checkSelfPermission(Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED)camera.shootAuto()
+                    else requestPermissions(arrayOf(Manifest.permission.CAMERA),100)
+                }
+                label("Bei manueller Aufnahme werden Sekunden/ISO nur verwendet, wenn die Kamera sie unterstützt.",13f,muted)
                 val pv=TextureView(this)
                 preview=pv
                 content.addView(pv,LinearLayout.LayoutParams(-1,480))
@@ -189,20 +194,23 @@ class MainActivity:Activity(){
                     override fun onSurfaceTextureUpdated(s:SurfaceTexture){}
                 }
                 status=label("Starte Kamera…",14f,cyan)
-                label("ISO: "+iso+" | Sekunden: "+seconds)
-                val isoSeek=SeekBar(this).apply{max=3100;progress=700}
+                label("Wähle manuelle Belichtung. Die Camera2-Maximalzeit steht nach Kamerastart im Status.",13f,muted)
+                val isoSeek=SeekBar(this).apply{max=3100;progress=(iso-100).coerceIn(0,3100)}
                 content.addView(isoSeek)
                 val isoText=label("ISO "+iso)
                 isoSeek.setOnSeekBarChangeListener(listener {v->iso=(100+v).coerceAtLeast(100);isoText.text="ISO "+iso})
-                val expSeek=SeekBar(this).apply{max=29;progress=4}
+                val expSeek=SeekBar(this).apply{max=29;progress=(seconds.toInt()-1).coerceIn(0,29)}
                 content.addView(expSeek)
                 val secText=label("Belichtung "+seconds+" s")
                 expSeek.setOnSeekBarChangeListener(listener{v->seconds=v+1.0;secText.text="Belichtung "+seconds+" s"})
-                button("FOTO AUFNEHMEN"){if(checkSelfPermission(Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED)camera.shoot(iso,seconds) else requestPermissions(arrayOf(Manifest.permission.CAMERA),100)}
+                button("MANUELL FOTOGRAFIEREN"){
+                    if(checkSelfPermission(Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED)camera.shoot(iso,seconds)
+                    else requestPermissions(arrayOf(Manifest.permission.CAMERA),100)
+                }
                 if(checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED){
                     button("Kameraberechtigung erteilen"){requestPermissions(arrayOf(Manifest.permission.CAMERA),100)}
                 }
-                label("DNG nur bei RAW_SENSOR und unterstützter Streamkombination. Proprietäres Expert-RAW-Stacking nicht enthalten.")
+                label("Nach der Aufnahme erscheinen die zurückgemeldeten Sensorwerte direkt im Status. Falls Camera2 deine Zeit nicht erlaubt, lösen wir absichtlich nicht aus. DNG nur mit RAW_SENSOR. Kein Expert-RAW-Stacking.",13f,muted)
             }
         }
     }
