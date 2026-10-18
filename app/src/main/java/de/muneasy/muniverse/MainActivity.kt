@@ -5,11 +5,14 @@ import android.app.Activity
 import android.content.pm.PackageManager
 import android.content.Context
 import android.graphics.Color
+import android.content.res.ColorStateList
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.view.Gravity
 import android.graphics.SurfaceTexture
 import android.view.TextureView
 import android.view.View
+import android.view.WindowInsets
 import android.widget.*
 import android.hardware.SensorManager
 import java.text.SimpleDateFormat
@@ -22,6 +25,8 @@ class MainActivity:Activity(){
     private val cyan=Color.rgb(0,217,245)
     private val muted=Color.rgb(160,184,200)
     private lateinit var root:LinearLayout
+    private val navButtons=mutableMapOf<String,Button>()
+    private fun dp(value:Int)=(value*resources.displayMetrics.density+0.5f).toInt()
     private lateinit var content:LinearLayout
     private lateinit var camera:CameraLab
     private lateinit var sky:SkySensors
@@ -43,30 +48,55 @@ class MainActivity:Activity(){
             heading=bearing
             if(screen=="sky")status?.text=skyText(accuracy)
         }}
-        root=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setBackgroundColor(bg)}
+        root=LinearLayout(this).apply{
+            orientation=LinearLayout.VERTICAL
+            setBackgroundColor(bg)
+            // Android 15/16: keep the entire UI clear of system status/navigation bars.
+            setOnApplyWindowInsetsListener { view, insets ->
+                val safe=insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+                view.setPadding(0,safe.top,0,safe.bottom)
+                insets
+            }
+        }
         setContentView(root)
+        root.post { root.requestApplyInsets() }
         val head=TextView(this).apply{
-            text="✦  M U N I V E R S E\nNIGHTLAB  /  ASTROCAMERA"
-            setTextColor(cyan);textSize=19f
-            setPadding(20,36,18,25)
+            text="✦  MUNIVERSE\nNIGHTLAB  /  ASTROCAMERA"
+            setTextColor(cyan);textSize=17f
+            setPadding(dp(16),dp(13),dp(16),dp(10))
         }
         root.addView(head)
         val frame=ScrollView(this).apply{isFillViewport=true}
         content=LinearLayout(this).apply{
             orientation=LinearLayout.VERTICAL
-            setPadding(22,20,22,24)
+            setPadding(dp(16),dp(6),dp(16),dp(18))
         }
         frame.addView(content)
         root.addView(frame,LinearLayout.LayoutParams(-1,0,1f))
-        val nav=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
+        // Fixed bottom navigation, outside the scrolling mission list and above Android's gesture bar.
+        val nav=LinearLayout(this).apply{
+            orientation=LinearLayout.HORIZONTAL
+            gravity=Gravity.CENTER
+            setBackgroundColor(Color.rgb(9,29,43))
+            setPadding(dp(6),dp(6),dp(6),dp(6))
+        }
         listOf("Mission" to "mission","Kamera" to "camera","Sky" to "sky","S23" to "hardware").forEach { (label,code)->
             val b=Button(this).apply{
-                text=label;textSize=11f;isAllCaps=false
+                text=label
+                textSize=12f
+                isAllCaps=false
+                minHeight=dp(52)
+                setPadding(dp(3),0,dp(3),0)
+                setTextColor(fg)
                 setOnClickListener{show(code)}
             }
-            nav.addView(b,LinearLayout.LayoutParams(0,-2,1f))
+            navButtons[code]=b
+            nav.addView(b,LinearLayout.LayoutParams(0,dp(52),1f).apply{
+                marginStart=dp(2)
+                marginEnd=dp(2)
+            })
         }
-        root.addView(nav)
+        root.addView(nav,LinearLayout.LayoutParams(-1,-2))
         show("mission")
     }
     private fun title(t:String){label(t,22f,fg)}
@@ -82,20 +112,51 @@ class MainActivity:Activity(){
         if(screen=="camera"&&page!="camera")camera.close()
         if(screen=="sky"&&page!="sky")sky.stop()
         screen=page
+        navButtons.forEach { (code, b) ->
+            val selected=code==page
+            b.backgroundTintList=ColorStateList.valueOf(
+                if(selected) Color.rgb(0,91,112) else Color.rgb(24,48,64))
+            b.setTextColor(if(selected) Color.WHITE else Color.rgb(210,228,236))
+        }
         content.removeAllViews()
         status=null;preview=null
         when(page){
             "mission"->{
-                title("DEINE NÄCHSTE FOTONACHT")
-                label("Sterne finden. Echt fotografieren. Keine erfundenen Bilddetails.")
-                label("Offline-Himmelskarte · Standort für v0.1: Magdeburg")
+                title("DEINE FOTONACHT")
+                label("Himmelsziele · Magdeburg (offline)",14f,muted)
                 AstroMath.targets.forEachIndexed{index,t->
                     val p=AstroMath.position(t,lat,lon,System.currentTimeMillis())
-                    label(t.name+"\n"+p.az.toInt()+"° "+AstroMath.compass(p.az)+
-                        " · Höhe "+p.alt.toInt()+"°",16f,if(p.alt>10)cyan else muted)
-                    button("Im Skyfinder öffnen"){target=index;show("sky")}
+                    val card=LinearLayout(this).apply{
+                        orientation=LinearLayout.HORIZONTAL
+                        gravity=Gravity.CENTER_VERTICAL
+                        setPadding(dp(12),dp(9),dp(9),dp(9))
+                        background=GradientDrawable().apply{
+                            setColor(Color.rgb(13,34,50))
+                            cornerRadius=dp(12).toFloat()
+                        }
+                    }
+                    val detail=TextView(this).apply{
+                        text=t.name+"\n"+p.az.toInt()+"° "+AstroMath.compass(p.az)+
+                            " · Höhe "+p.alt.toInt()+"°"
+                        setTextColor(if(p.alt>10) fg else muted)
+                        textSize=15f
+                        setLineSpacing(dp(3).toFloat(),1f)
+                    }
+                    card.addView(detail,LinearLayout.LayoutParams(0,-2,1f))
+                    val aim=Button(this).apply{
+                        text="ZIELEN"
+                        textSize=12f
+                        isAllCaps=false
+                        setTextColor(bg)
+                        backgroundTintList=ColorStateList.valueOf(cyan)
+                        setOnClickListener{target=index;show("sky")}
+                    }
+                    card.addView(aim,LinearLayout.LayoutParams(dp(94),dp(48)))
+                    content.addView(card,LinearLayout.LayoutParams(-1,-2).apply{
+                        bottomMargin=dp(9)
+                    })
                 }
-                label("Positionen sind Näherungen, ohne Wetter und Sternbild-Erkennung.")
+                label("Positionen sind Näherungen; Kompass kalibrieren. Wetter nicht berücksichtigt.",13f,muted)
             }
             "hardware"->{
                 title("S23 · HARDWARE LAB")
