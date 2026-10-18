@@ -4,6 +4,8 @@ import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.graphics.Color
 import android.content.res.ColorStateList
 import android.graphics.drawable.GradientDrawable
@@ -30,6 +32,8 @@ class MainActivity:Activity(){
     private lateinit var content:LinearLayout
     private lateinit var camera:CameraLab
     private lateinit var sky:SkySensors
+    @Volatile private var stacking=false
+    private var stackStatus:TextView?=null
     private var screen="mission"
     private var target=0
     private var heading:Bearing?=null
@@ -80,7 +84,7 @@ class MainActivity:Activity(){
             setBackgroundColor(Color.rgb(9,29,43))
             setPadding(dp(6),dp(6),dp(6),dp(6))
         }
-        listOf("Mission" to "mission","Kamera" to "camera","Sky" to "sky","S23" to "hardware").forEach { (label,code)->
+        listOf("Mission" to "mission","Kamera" to "camera","Stack" to "stack","Sky" to "sky","S23" to "hardware").forEach { (label,code)->
             val b=Button(this).apply{
                 text=label
                 textSize=12f
@@ -119,7 +123,7 @@ class MainActivity:Activity(){
             b.setTextColor(if(selected) Color.WHITE else Color.rgb(210,228,236))
         }
         content.removeAllViews()
-        status=null;preview=null
+        status=null;preview=null;stackStatus=null
         when(page){
             "mission"->{
                 title("DEINE FOTONACHT")
@@ -158,6 +162,37 @@ class MainActivity:Activity(){
                     })
                 }
                 label("Positionen sind Näherungen; Kompass kalibrieren. Wetter nicht berücksichtigt.",13f,muted)
+            }
+            "stack"->{
+                title("✦ STACK LAB · ECHTE PIXEL")
+                label("10 echte JPGs → Ausrichten → Mittelwert bilden. Keine generative KI, keine künstlichen Sterne. Alle Originale bleiben unverändert.",14f,muted)
+                label("Experimentelle Vorschau: Der PNG-Stack wird auf maximal 1600 px verkleinert, um RAM und Akku zu schonen. Sensor-JPGs werden nicht nachträglich aufgehellt.",13f,muted)
+                button("LETZTE BURST-SERIE STACKEN"){
+                    if(stacking)return@button
+                    Thread {
+                        try{
+                            val files=StackLab.latestBurst(this)
+                            if(files.size<2){
+                                runOnUiThread {
+                                    stackStatus?.text="Keine zugängliche Burst-Serie gefunden. Bitte JPGs manuell auswählen."
+                                }
+                            }else startStack(files)
+                        }catch(e:Exception){
+                            runOnUiThread{stackStatus?.text="Burst-Suche fehlgeschlagen: "+e.message}
+                        }
+                    }.start()
+                }
+                button("JPG-DATEIEN MANUELL AUSWÄHLEN"){
+                    if(stacking)return@button
+                    val intent=Intent(Intent.ACTION_OPEN_DOCUMENT).apply{
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type="image/jpeg"
+                        putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true)
+                    }
+                    startActivityForResult(intent,602)
+                }
+                stackStatus=label(if(stacking)"Stacking läuft im Hintergrund …" else "Bereit. Bitte nach Möglichkeit nur Bilder derselben Serie wählen.",15f,cyan)
+                label("Warum Stacken? Das arithmetische Mittel reduziert unkorreliertes Bildrauschen. Es macht aus 0,15-s-Einzelbildern aber keine echte minutenlange Einzelbelichtung und kann bei Wolken/Bewegung Geisterbilder erzeugen.",13f,muted)
             }
             "hardware"->{
                 title("S23 · HARDWARE LAB")
@@ -232,6 +267,45 @@ class MainActivity:Activity(){
             }
         }
     }
+    private fun startStack(files:List<Uri>){
+        if(stacking)return
+        stacking=true
+        runOnUiThread{stackStatus?.text="Beginne mit ${files.size} JPGs…"}
+        Thread {
+            try{
+                val result=StackLab.stack(this,files){message->
+                    runOnUiThread{stackStatus?.text=message}
+                }
+                runOnUiThread{
+                    stacking=false
+                    stackStatus?.text="FERTIG: ${result.count} Bilder kombiniert (PNG ${result.width} × ${result.height})." +
+                        "\nGespeichert unter Bilder → MUNIVERSE → Stacks." +
+                        "\nErkannte Bildverschiebungen: ${result.shifts}" +
+                        "\nOhne generative KI. Original-JPGs nicht verändert."
+                    Toast.makeText(this,"MUNIVERSE STACK gespeichert!",Toast.LENGTH_LONG).show()
+                }
+            }catch(e:Exception){
+                runOnUiThread{
+                    stacking=false
+                    stackStatus?.text="STACK FEHLGESCHLAGEN: ${e.message}"
+                }
+            }
+        }.start()
+    }
+
+    @Deprecated("Uses Android file picker for multi-JPEG selection")
+    override fun onActivityResult(requestCode:Int,resultCode:Int,data:Intent?){
+        super.onActivityResult(requestCode,resultCode,data)
+        if(requestCode!=602 || resultCode!=RESULT_OK || data==null)return
+        val chosen=mutableListOf<Uri>()
+        val clip=data.clipData
+        if(clip!=null){
+            for(i in 0 until clip.itemCount){chosen.add(clip.getItemAt(i).uri)}
+        }else data.data?.let{chosen.add(it)}
+        if(chosen.size in 2..30)startStack(chosen.distinct())
+        else stackStatus?.text="Bitte zwischen 2 und 30 JPGs auswählen (gewählt: ${chosen.size})."
+    }
+
     private fun listener(action:(Int)->Unit)=object:SeekBar.OnSeekBarChangeListener{
         override fun onProgressChanged(s:SeekBar?,v:Int,user:Boolean){action(v)}
         override fun onStartTrackingTouch(s:SeekBar?){}
