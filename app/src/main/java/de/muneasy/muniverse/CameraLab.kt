@@ -11,6 +11,7 @@ import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.view.Surface
 import android.view.TextureView
@@ -36,6 +37,21 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
     private var imageJpg:Image?=null
     private var imageRaw:Image?=null
     private var busy=false
+    private var requestedSeconds=0.0
+    private var requestedIso=0
+    private var autoExposure=false
+    private var requestedAtMs=0L
+
+    fun exposureSupport():String {
+        val c=characteristics ?: return "Camera2: noch nicht geöffnet"
+        val caps=c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?:intArrayOf()
+        val manual=caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
+        val range=c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+        val iso=c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+        return "Kamera ${currentId ?: "?"} · Manual: ${if(manual) "JA" else "NEIN"}" +
+            "\nZulässige Belichtung: ${if(range!=null) String.format(Locale.GERMANY,"%.4f – %.2f s",range.lower/1e9,range.upper/1e9) else "unbekannt"}" +
+            "\nISO: ${iso ?: "unbekannt"}"
+    }
 
     private fun notify(s:String)=activity.runOnUiThread{tell(s)}
 
@@ -49,7 +65,7 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
                 "Camera "+id+" / "+(if(c.get(CameraCharacteristics.LENS_FACING)==CameraCharacteristics.LENS_FACING_BACK)"BACK" else "FRONT")+
                 "\nRAW_SENSOR: "+modes.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)+
                 "\nMANUAL_SENSOR: "+modes.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)+
-                "\nISO: "+(iso?.toString()?:"?")+"\nBelichtung ns: "+(exp?.toString()?:"?")
+                "\nISO: "+(iso?.toString()?:"?")+"\nBelichtung: "+(if(exp!=null) String.format(Locale.GERMANY,"%.4f bis %.2f Sekunden",exp.lower/1e9,exp.upper/1e9) else "unbekannt")
             }
         }catch(e:Exception){"Hardwarebericht: "+e.message}
     }
@@ -103,7 +119,7 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
                         b.addTarget(surface!!)
                         b.set(CaptureRequest.CONTROL_AE_MODE,CaptureRequest.CONTROL_AE_MODE_ON)
                         s.setRepeatingRequest(b.build(),null,handler)
-                        notify("Kamera bereit: "+(if(raw!=null)"RAW + JPEG (Test)" else "JPEG"))
+                        notify("Kamera bereit: "+(if(raw!=null)"RAW + JPEG (Test)" else "JPEG") + "\n" + exposureSupport())
                     }catch(e:Exception){notify("Vorschau: "+e.message)}
                 }
                 override fun onConfigureFailed(s:CameraCaptureSession){
@@ -118,34 +134,116 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
         }catch(e:Exception){notify("Session: "+e.message)}
     }
 
-    fun shoot(iso:Int,seconds:Double){
+    /**
+     * Manual exposure requests are deliberately refused if they exceed the reported
+     * hardware range. Camera2 may still shorten them; check CaptureResult.
+     */
+    fun shoot(iso:Int,seconds:Double)=capture(iso,seconds,false)
+    fun shootAuto()=capture(400,0.0,true)
+
+    private fun resumePreview(){
+        val cam=device?:return
+        val sess=session?:return
+        val surf=surface?:return
+        try{
+            val p=cam.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply{
+                addTarget(surf)
+                set(CaptureRequest.CONTROL_MODE,CaptureRequest.CONTROL_MODE_AUTO)
+                set(CaptureRequest.CONTROL_AE_MODE,CaptureRequest.CONTROL_AE_MODE_ON)
+                set(CaptureRequest.CONTROL_AWB_MODE,CaptureRequest.CONTROL_AWB_MODE_AUTO)
+            }
+            sess.setRepeatingRequest(p.build(),null,handler)
+        }catch(e:Exception){notify("Vorschau-Neustart: "+e.message)}
+    }
+
+    private fun capture(iso:Int,seconds:Double,auto:Boolean){
         val cam=device?:return notify("Kamera nicht bereit")
-        val s=session?:return notify("Vorschau noch nicht bereit")
-        if(busy)return notify("Aufnahme läuft")
-        val ch=characteristics?:return
+        val sess=session?:return notify("Vorschau noch nicht bereit")
+        if(busy)return notify("Noch beschäftigt – bitte auf Abschluss warten.")
+        val ch=characteristics?:return notify("Kein Hardwareprofil")
+        val caps=ch.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?:intArrayOf()
+        val manual=caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
+        val range=ch.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+        val isoRange=ch.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+
+        if(!auto){
+            if(!manual || range==null || isoRange==null){
+                notify("Diese Kamera bietet keine manuelle Camera2-Belichtung. Verwende AUTO-TEST oder S23-Bericht.")
+                return
+            }
+            val nanos=(seconds*1e9).toLong()
+            if(nanos<range.lower || nanos>range.upper){
+                notify("NICHT AUSGELÖST: ${seconds.toInt()} s verlangt, Camera2 erlaubt höchstens " +
+                    String.format(Locale.GERMANY,"%.3f",range.upper/1e9)+" s. Kein stilles Kürzen!")
+                return
+            }
+            if(iso !in isoRange.lower..isoRange.upper){
+                notify("NICHT AUSGELÖST: ISO $iso außerhalb ${isoRange.lower}–${isoRange.upper}")
+                return
+            }
+        }
         busy=true
+        requestedSeconds=seconds
+        requestedIso=iso
+        autoExposure=auto
+        requestedAtMs=SystemClock.elapsedRealtime()
         onCapture=null;imageJpg=null;imageRaw=null
         try{
-            val b=cam.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
-            jpeg?.surface?.let{b.addTarget(it)}
-            raw?.surface?.let{b.addTarget(it)}
-            val caps=ch.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?:intArrayOf()
-            if(caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)){
-                val ranges=ch.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
-                val isos=ch.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
-                b.set(CaptureRequest.CONTROL_MODE,CaptureRequest.CONTROL_MODE_OFF)
-                b.set(CaptureRequest.CONTROL_AE_MODE,CaptureRequest.CONTROL_AE_MODE_OFF)
-                b.set(CaptureRequest.CONTROL_AF_MODE,CaptureRequest.CONTROL_AF_MODE_OFF)
-                b.set(CaptureRequest.LENS_FOCUS_DISTANCE,0f)
-                b.set(CaptureRequest.SENSOR_EXPOSURE_TIME,(seconds*1e9).toLong().coerceIn(ranges?.lower?:1000000L,ranges?.upper?:30000000000L))
-                b.set(CaptureRequest.SENSOR_SENSITIVITY,iso.coerceIn(isos?.lower?:100,isos?.upper?:3200))
-            }else b.set(CaptureRequest.CONTROL_AE_MODE,CaptureRequest.CONTROL_AE_MODE_ON)
-            notify("Belichtung gestartet. S23 nicht bewegen!")
-            s.capture(b.build(),object:CameraCaptureSession.CaptureCallback(){
-                override fun onCaptureCompleted(s:CameraCaptureSession,r:CaptureRequest,result:TotalCaptureResult){onCapture=result;trySave()}
-                override fun onCaptureFailed(s:CameraCaptureSession,r:CaptureRequest,f:CaptureFailure){busy=false;notify("Aufnahme fehlgeschlagen: "+f.reason)}
+            val request=cam.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+            jpeg?.surface?.let{request.addTarget(it)}
+            raw?.surface?.let{request.addTarget(it)}
+            request.set(CaptureRequest.CONTROL_MODE,CaptureRequest.CONTROL_MODE_AUTO)
+            request.set(CaptureRequest.CONTROL_AWB_MODE,CaptureRequest.CONTROL_AWB_MODE_AUTO)
+            if(auto){
+                request.set(CaptureRequest.CONTROL_AE_MODE,CaptureRequest.CONTROL_AE_MODE_ON)
+                request.set(CaptureRequest.CONTROL_AF_MODE,CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                notify("AUTO-TEST läuft (Kamera wählt Belichtung).")
+            }else{
+                val requested=(seconds*1e9).toLong()
+                request.set(CaptureRequest.CONTROL_AE_MODE,CaptureRequest.CONTROL_AE_MODE_OFF)
+                request.set(CaptureRequest.CONTROL_AF_MODE,CaptureRequest.CONTROL_AF_MODE_OFF)
+                if((ch.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)?:0f)>0f){
+                    request.set(CaptureRequest.LENS_FOCUS_DISTANCE,0f)
+                }
+                request.set(CaptureRequest.SENSOR_EXPOSURE_TIME,requested)
+                request.set(CaptureRequest.SENSOR_SENSITIVITY,iso)
+                val maxFrame=ch.get(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION)
+                if(maxFrame!=null && maxFrame>=requested){
+                    request.set(CaptureRequest.SENSOR_FRAME_DURATION,(requested+10000000L).coerceAtMost(maxFrame))
+                }
+                notify("MANUELL gestartet: angefordert ${seconds} s · ISO ${iso}. Nicht bewegen!")
+            }
+            sess.stopRepeating()
+            sess.capture(request.build(),object:CameraCaptureSession.CaptureCallback(){
+                override fun onCaptureCompleted(s:CameraCaptureSession,r:CaptureRequest,result:TotalCaptureResult){
+                    onCapture=result
+                    resumePreview()
+                    trySave()
+                    handler.postDelayed({
+                        if(busy && onCapture!=null){
+                            // Some HALs do not deliver both image streams on mixed captures.
+                            if(imageJpg!=null){
+                                notify("RAW verzögert/fehlt, sichere vorhandenes JPG.")
+                                raw?.let { imageRaw?.close(); imageRaw=null }
+                                trySave(true)
+                            }else{
+                                notify("Kein JPG geliefert. Bitte AUTO-TEST und Hardwarebericht prüfen.")
+                                busy=false
+                            }
+                        }
+                    },7000L)
+                }
+                override fun onCaptureFailed(s:CameraCaptureSession,r:CaptureRequest,f:CaptureFailure){
+                    busy=false
+                    resumePreview()
+                    notify("Camera2-Aufnahme fehlgeschlagen: "+f.reason)
+                }
             },handler)
-        }catch(e:Exception){busy=false;notify("Aufnahmefehler: "+e.message)}
+        }catch(e:Exception){
+            busy=false
+            resumePreview()
+            notify("Aufnahmefehler: "+e.message)
+        }
     }
 
     private fun storeImage(image:Image?,isRaw:Boolean){
@@ -155,12 +253,22 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
         trySave()
     }
 
-    private fun trySave(){
+    private fun trySave(allowJpegOnly:Boolean=false){
         val capture=onCapture?:return
         val j=imageJpg?:return
-        if(raw!=null&&imageRaw==null)return
+        if(raw!=null&&imageRaw==null&&!allowJpegOnly)return
         val r=imageRaw
         onCapture=null;imageJpg=null;imageRaw=null
+        val actualNanos=capture.get(CaptureResult.SENSOR_EXPOSURE_TIME)
+        val actualIso=capture.get(CaptureResult.SENSOR_SENSITIVITY)
+        val aeMode=capture.get(CaptureResult.CONTROL_AE_MODE)
+        val elapsed=(SystemClock.elapsedRealtime()-requestedAtMs)/1000.0
+        val actualSec=actualNanos?.div(1e9)
+        val measured=if(actualSec!=null) String.format(Locale.GERMANY,"%.4f",actualSec) else "nicht verfügbar"
+        val info="Anfrage: " + (if(autoExposure)"AUTO" else String.format(Locale.GERMANY,"%.1f s / ISO %d",requestedSeconds,requestedIso)) +
+            "\nSensor meldet: "+measured+" s / ISO "+(actualIso?.toString()?:"?")+
+            "\nAE-Modus: "+aeMode+" · Wartezeit: "+String.format(Locale.GERMANY,"%.2f",elapsed)+" s"
+        val mismatch=!autoExposure && (actualSec==null || actualSec<requestedSeconds*0.90)
         Thread{
             try{
                 val name=SimpleDateFormat("yyyyMMdd_HHmmss",Locale.US).format(Date())
@@ -173,7 +281,8 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
                     }
                 }
                 try{ToneGenerator(AudioManager.STREAM_NOTIFICATION,50).apply{startTone(ToneGenerator.TONE_PROP_ACK,200);Thread.sleep(230);release()}}catch(_:Exception){}
-                notify("Gespeichert: Pictures/MUNIVERSE ("+(if(r!=null)"JPG + DNG" else "JPG")+")")
+                notify("Gespeichert: Pictures/MUNIVERSE ("+(if(r!=null)"JPG + DNG" else "JPG")+")\n"+info+
+                    if(mismatch)"\nWARNUNG: Belichtung wurde vom Gerät nicht wie angefordert umgesetzt." else "")
             }catch(e:Exception){notify("Speicherfehler: "+e.message)}
             finally{j.close();r?.close();busy=false}
         }.start()
