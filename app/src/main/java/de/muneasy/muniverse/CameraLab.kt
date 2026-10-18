@@ -1,0 +1,206 @@
+package de.muneasy.muniverse
+
+import android.Manifest
+import android.app.Activity
+import android.content.ContentValues
+import android.content.Context
+import android.content.pm.PackageManager
+import android.graphics.ImageFormat
+import android.hardware.camera2.*
+import android.media.Image
+import android.media.ImageReader
+import android.os.Handler
+import android.os.HandlerThread
+import android.provider.MediaStore
+import android.view.Surface
+import android.view.TextureView
+import android.media.ToneGenerator
+import android.media.AudioManager
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+/** Camera2 hardware experiments. A successful DNG requires RAW_SENSOR, NOT just a filename change. */
+class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
+    private val manager=activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+    private val worker=HandlerThread("MUNIVERSE-Camera").apply{start()}
+    private val handler=Handler(worker.looper)
+    private var device:CameraDevice?=null
+    private var session:CameraCaptureSession?=null
+    private var surface:Surface?=null
+    private var jpeg:ImageReader?=null
+    private var raw:ImageReader?=null
+    private var characteristics:CameraCharacteristics?=null
+    private var currentId:String?=null
+    private var onCapture:TotalCaptureResult?=null
+    private var imageJpg:Image?=null
+    private var imageRaw:Image?=null
+    private var busy=false
+
+    private fun notify(s:String)=activity.runOnUiThread{tell(s)}
+
+    fun capabilityReport():String {
+        return try {
+            manager.cameraIdList.joinToString("\n\n"){id->
+                val c=manager.getCameraCharacteristics(id)
+                val modes=c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?:intArrayOf()
+                val iso=c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+                val exp=c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+                "Camera "+id+" / "+(if(c.get(CameraCharacteristics.LENS_FACING)==CameraCharacteristics.LENS_FACING_BACK)"BACK" else "FRONT")+
+                "\nRAW_SENSOR: "+modes.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)+
+                "\nMANUAL_SENSOR: "+modes.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)+
+                "\nISO: "+(iso?.toString()?:"?")+"\nBelichtung ns: "+(exp?.toString()?:"?")
+            }
+        }catch(e:Exception){"Hardwarebericht: "+e.message}
+    }
+
+    fun start(view:TextureView) {
+        if(activity.checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED){notify("Kameraberechtigung benötigt");return}
+        if(!view.isAvailable){notify("Vorschau wird vorbereitet");return}
+        close()
+        try {
+            val id=manager.cameraIdList.firstOrNull {
+                manager.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING)==CameraCharacteristics.LENS_FACING_BACK
+            }?:throw IllegalStateException("Keine Rückkamera")
+            currentId=id
+            val c=manager.getCameraCharacteristics(id)
+            characteristics=c
+            val config=c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)?:error("Keine Output-Konfiguration")
+            val modes=c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?:intArrayOf()
+            val sizes=config.getOutputSizes(ImageFormat.JPEG)?:error("JPEG nicht unterstützt")
+            val jpgSize=sizes.filter{it.width.toLong()*it.height<=16000000L}.maxByOrNull{it.width.toLong()*it.height}?:sizes.first()
+            jpeg=ImageReader.newInstance(jpgSize.width,jpgSize.height,ImageFormat.JPEG,2).apply {
+                setOnImageAvailableListener({r->storeImage(r.acquireNextImage(),false)},handler)
+            }
+            if(modes.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)){
+                config.getOutputSizes(ImageFormat.RAW_SENSOR)?.maxByOrNull{it.width.toLong()*it.height}?.let{sz->
+                    raw=ImageReader.newInstance(sz.width,sz.height,ImageFormat.RAW_SENSOR,2).apply{
+                        setOnImageAvailableListener({r->storeImage(r.acquireNextImage(),true)},handler)
+                    }
+                }
+            }
+            manager.openCamera(id,object:CameraDevice.StateCallback(){
+                override fun onOpened(c:CameraDevice){device=c;configure(view)}
+                override fun onDisconnected(c:CameraDevice){c.close();notify("Kamera getrennt")}
+                override fun onError(c:CameraDevice,error:Int){c.close();notify("Camera2 Fehler "+error)}
+            },handler)
+            notify("Kamera "+id+" wird geöffnet")
+        }catch(e:Exception){notify("Startfehler: "+e.message);close()}
+    }
+
+    private fun configure(view:TextureView){
+        val cam=device?:return
+        try{
+            val tex=view.surfaceTexture?:return
+            tex.setDefaultBufferSize(1920,1080)
+            surface=Surface(tex)
+            val outputs=listOfNotNull(surface,jpeg?.surface,raw?.surface)
+            cam.createCaptureSession(outputs,object:CameraCaptureSession.StateCallback(){
+                override fun onConfigured(s:CameraCaptureSession){
+                    session=s
+                    try{
+                        val b=cam.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
+                        b.addTarget(surface!!)
+                        b.set(CaptureRequest.CONTROL_AE_MODE,CaptureRequest.CONTROL_AE_MODE_ON)
+                        s.setRepeatingRequest(b.build(),null,handler)
+                        notify("Kamera bereit: "+(if(raw!=null)"RAW + JPEG (Test)" else "JPEG"))
+                    }catch(e:Exception){notify("Vorschau: "+e.message)}
+                }
+                override fun onConfigureFailed(s:CameraCaptureSession){
+                    s.close()
+                    if(raw!=null){
+                        raw?.close();raw=null
+                        notify("RAW-Kombination verweigert, teste JPEG.")
+                        configure(view)
+                    }else notify("Kamera-Session fehlgeschlagen")
+                }
+            },handler)
+        }catch(e:Exception){notify("Session: "+e.message)}
+    }
+
+    fun shoot(iso:Int,seconds:Double){
+        val cam=device?:return notify("Kamera nicht bereit")
+        val s=session?:return notify("Vorschau noch nicht bereit")
+        if(busy)return notify("Aufnahme läuft")
+        val ch=characteristics?:return
+        busy=true
+        onCapture=null;imageJpg=null;imageRaw=null
+        try{
+            val b=cam.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+            jpeg?.surface?.let{b.addTarget(it)}
+            raw?.surface?.let{b.addTarget(it)}
+            val caps=ch.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?:intArrayOf()
+            if(caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)){
+                val ranges=ch.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+                val isos=ch.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+                b.set(CaptureRequest.CONTROL_MODE,CaptureRequest.CONTROL_MODE_OFF)
+                b.set(CaptureRequest.CONTROL_AE_MODE,CaptureRequest.CONTROL_AE_MODE_OFF)
+                b.set(CaptureRequest.CONTROL_AF_MODE,CaptureRequest.CONTROL_AF_MODE_OFF)
+                b.set(CaptureRequest.LENS_FOCUS_DISTANCE,0f)
+                b.set(CaptureRequest.SENSOR_EXPOSURE_TIME,(seconds*1e9).toLong().coerceIn(ranges?.lower?:1000000L,ranges?.upper?:30000000000L))
+                b.set(CaptureRequest.SENSOR_SENSITIVITY,iso.coerceIn(isos?.lower?:100,isos?.upper?:3200))
+            }else b.set(CaptureRequest.CONTROL_AE_MODE,CaptureRequest.CONTROL_AE_MODE_ON)
+            notify("Belichtung gestartet. S23 nicht bewegen!")
+            s.capture(b.build(),object:CameraCaptureSession.CaptureCallback(){
+                override fun onCaptureCompleted(s:CameraCaptureSession,r:CaptureRequest,result:TotalCaptureResult){onCapture=result;trySave()}
+                override fun onCaptureFailed(s:CameraCaptureSession,r:CaptureRequest,f:CaptureFailure){busy=false;notify("Aufnahme fehlgeschlagen: "+f.reason)}
+            },handler)
+        }catch(e:Exception){busy=false;notify("Aufnahmefehler: "+e.message)}
+    }
+
+    private fun storeImage(image:Image?,isRaw:Boolean){
+        if(image==null)return
+        if(!busy){image.close();return}
+        if(isRaw){imageRaw?.close();imageRaw=image}else{imageJpg?.close();imageJpg=image}
+        trySave()
+    }
+
+    private fun trySave(){
+        val capture=onCapture?:return
+        val j=imageJpg?:return
+        if(raw!=null&&imageRaw==null)return
+        val r=imageRaw
+        onCapture=null;imageJpg=null;imageRaw=null
+        Thread{
+            try{
+                val name=SimpleDateFormat("yyyyMMdd_HHmmss",Locale.US).format(Date())
+                val buffer=j.planes[0].buffer
+                val bytes=ByteArray(buffer.remaining());buffer.get(bytes)
+                save(name+".jpg","image/jpeg"){it.write(bytes)}
+                if(r!=null){
+                    save(name+".dng","image/x-adobe-dng"){stream->
+                        DngCreator(characteristics!!,capture).use{it.writeImage(stream,r)}
+                    }
+                }
+                try{ToneGenerator(AudioManager.STREAM_NOTIFICATION,50).apply{startTone(ToneGenerator.TONE_PROP_ACK,200);Thread.sleep(230);release()}}catch(_:Exception){}
+                notify("Gespeichert: Pictures/MUNIVERSE ("+(if(r!=null)"JPG + DNG" else "JPG")+")")
+            }catch(e:Exception){notify("Speicherfehler: "+e.message)}
+            finally{j.close();r?.close();busy=false}
+        }.start()
+    }
+    private fun save(filename:String,mime:String,write:(java.io.OutputStream)->Unit){
+        val values=ContentValues().apply{
+            put(MediaStore.Images.Media.DISPLAY_NAME,"MUNIVERSE_"+filename)
+            put(MediaStore.Images.Media.MIME_TYPE,mime)
+            put(MediaStore.Images.Media.RELATIVE_PATH,"Pictures/MUNIVERSE")
+            put(MediaStore.Images.Media.IS_PENDING,1)
+        }
+        val uri=activity.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,values)?:error("MediaStore insert")
+        try{
+            activity.contentResolver.openOutputStream(uri)?.use{write(it)}?:error("OutputStream unavailable")
+            values.clear();values.put(MediaStore.Images.Media.IS_PENDING,0)
+            activity.contentResolver.update(uri,values,null,null)
+        }catch(e:Exception){activity.contentResolver.delete(uri,null,null);throw e}
+    }
+    fun close(){
+        try{session?.close()}catch(_:Exception){}
+        try{device?.close()}catch(_:Exception){}
+        try{surface?.release()}catch(_:Exception){}
+        try{jpeg?.close()}catch(_:Exception){}
+        try{raw?.close()}catch(_:Exception){}
+        session=null;device=null;surface=null;jpeg=null;raw=null
+        try{imageJpg?.close();imageRaw?.close()}catch(_:Exception){}
+        imageJpg=null;imageRaw=null;onCapture=null;busy=false
+    }
+    fun shutdown(){close();worker.quitSafely()}
+}

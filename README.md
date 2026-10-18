@@ -1,17 +1,20 @@
 # MUNIVERSE · NightLab 🌌
 
-Native Android astrophotography laboratory for the Samsung Galaxy S23.
+Native Android astrophotography alpha built for Samsung Galaxy S23.
 
-**Status: v0.1 alpha – hardware testing required.** The first APK has not yet been verified on an S23. Camera2 RAW access and exposure duration depend on Samsung firmware.
+## v0.1 — experimental hardware test
+- S23 Camera2 capability report and camera preview
+- Manual ISO / exposure on devices which expose MANUAL_SENSOR
+- JPG + true RAW_SENSOR DNG where supported; fallback to JPEG-only when stream combination fails
+- Offline sky mission planner and pointing compass
+- Locally processed JPG editing without generative AI
 
-## Planned modules
-- Manual Camera2 capture and S23 camera capability report
-- Offline sky targets and compass aiming
-- Local non-generative image editing
-- RAW/DNG captures where the device exposes RAW_SENSOR
+**Status:** unverified Android alpha. Samsung Expert RAW multi-minute stacking is proprietary and NOT implemented here. A Camera2 DNG is not automatically the same as a Samsung Expert RAW DNG. Test on the S23 before relying on captures.
 
-Samsung Expert RAW's proprietary multi-minute stacking is **not** available by default through Camera2.
+## Install
+Open **Actions → Build MUNIVERSE test APK**, wait for the run, download artifact `MUNIVERSE-debug-APK`, extract and install `app-debug.apk` on the S23. Android may prompt to allow installation from that source.
 
-Build: GitHub Actions workflow `Build MUNIVERSE test APK` (once sources and workflow are committed).
+No login, analytics, camera image upload or network permission. Use a safe phone mount; never place the phone in vehicle traffic.
 
-No camera photos or location data will be uploaded to a backend.
+## Next
+Validate the Camera2 capability report and first JPEG/DNG on the actual Galaxy S23. Then add automated capture series, stacking and full real-DNG development.
