@@ -98,24 +98,24 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
                 }catch(e:Exception){"Größenabfrage: ${e.javaClass.simpleName}"}
             }else "nicht verfügbar"
             "Night-Extension: "+(if(night)"JA (noch kein Capture-Feature)" else "NEIN")+
-             "\\nVerfügbare Extensions: "+names.joinToString(", ").ifEmpty{"keine"}+
-             "\\nNight-JPEG-Größen: "+jpg
+             "\nVerfügbare Extensions: "+names.joinToString(", ").ifEmpty{"keine"}+
+             "\nNight-JPEG-Größen: "+jpg
         }catch(e:Exception){"Extensions-Abfrage fehlgeschlagen: ${e.javaClass.simpleName}: ${e.message}"}
     }
 
     fun capabilityReport():String {
         return try{
-            manager.cameraIdList.joinToString("\\n\\n"){id->
+            manager.cameraIdList.joinToString("\n\n"){id->
                 val c=manager.getCameraCharacteristics(id)
                 val modes=c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?:intArrayOf()
                 val iso=c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
                 val exp=c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
                 "Camera "+id+" / "+(if(c.get(CameraCharacteristics.LENS_FACING)==CameraCharacteristics.LENS_FACING_BACK)"BACK" else "FRONT")+
-                "\\nRAW_SENSOR: "+modes.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)+
-                "\\nMANUAL_SENSOR: "+modes.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)+
-                "\\nISO: "+(iso?.toString()?:"?")+
-                "\\nBelichtung: "+(if(exp!=null) String.format(Locale.GERMANY,"%.4f bis %.2f Sekunden",exp.lower/1e9,exp.upper/1e9) else "unbekannt")+
-                "\\n"+extensionReport(id)
+                "\nRAW_SENSOR: "+modes.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)+
+                "\nMANUAL_SENSOR: "+modes.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)+
+                "\nISO: "+(iso?.toString()?:"?")+
+                "\nBelichtung: "+(if(exp!=null) String.format(Locale.GERMANY,"%.4f bis %.2f Sekunden",exp.lower/1e9,exp.upper/1e9) else "unbekannt")+
+                "\n"+extensionReport(id)
             }
         }catch(e:Exception){"Hardwarebericht: "+e.message}
     }
