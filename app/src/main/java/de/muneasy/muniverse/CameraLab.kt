@@ -9,6 +9,7 @@ import android.graphics.ImageFormat
 import android.hardware.camera2.*
 import android.media.Image
 import android.media.ImageReader
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
@@ -77,17 +78,44 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
 
     private fun notify(s:String)=activity.runOnUiThread{tell(s)}
 
+    private fun extensionReport(id:String):String {
+        if(Build.VERSION.SDK_INT<31)return "Night-Extension: Android 12+ erforderlich"
+        return try{
+            val info=manager.getCameraExtensionCharacteristics(id)
+            val supported=info.supportedExtensions
+            fun enabled(type:Int)=supported.contains(type)
+            val names=listOfNotNull(
+                if(enabled(CameraExtensionCharacteristics.EXTENSION_NIGHT))"NIGHT" else null,
+                if(enabled(CameraExtensionCharacteristics.EXTENSION_HDR))"HDR" else null,
+                if(enabled(CameraExtensionCharacteristics.EXTENSION_AUTOMATIC))"AUTO" else null
+            )
+            val night=enabled(CameraExtensionCharacteristics.EXTENSION_NIGHT)
+            val jpg=if(night){
+                try{
+                    info.getExtensionSupportedSizes(CameraExtensionCharacteristics.EXTENSION_NIGHT,ImageFormat.JPEG)
+                      .sortedByDescending{it.width.toLong()*it.height}.take(3)
+                      .joinToString(", "){"${it.width}×${it.height}"}.ifEmpty{"keine JPEG-Ausgabe"}
+                }catch(e:Exception){"Größenabfrage: ${e.javaClass.simpleName}"}
+            }else "nicht verfügbar"
+            "Night-Extension: "+(if(night)"JA (noch kein Capture-Feature)" else "NEIN")+
+             "\\nVerfügbare Extensions: "+names.joinToString(", ").ifEmpty{"keine"}+
+             "\\nNight-JPEG-Größen: "+jpg
+        }catch(e:Exception){"Extensions-Abfrage fehlgeschlagen: ${e.javaClass.simpleName}: ${e.message}"}
+    }
+
     fun capabilityReport():String {
-        return try {
-            manager.cameraIdList.joinToString("\n\n"){id->
+        return try{
+            manager.cameraIdList.joinToString("\\n\\n"){id->
                 val c=manager.getCameraCharacteristics(id)
                 val modes=c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?:intArrayOf()
                 val iso=c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
                 val exp=c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
                 "Camera "+id+" / "+(if(c.get(CameraCharacteristics.LENS_FACING)==CameraCharacteristics.LENS_FACING_BACK)"BACK" else "FRONT")+
-                "\nRAW_SENSOR: "+modes.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)+
-                "\nMANUAL_SENSOR: "+modes.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)+
-                "\nISO: "+(iso?.toString()?:"?")+"\nBelichtung: "+(if(exp!=null) String.format(Locale.GERMANY,"%.4f bis %.2f Sekunden",exp.lower/1e9,exp.upper/1e9) else "unbekannt")
+                "\\nRAW_SENSOR: "+modes.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)+
+                "\\nMANUAL_SENSOR: "+modes.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)+
+                "\\nISO: "+(iso?.toString()?:"?")+
+                "\\nBelichtung: "+(if(exp!=null) String.format(Locale.GERMANY,"%.4f bis %.2f Sekunden",exp.lower/1e9,exp.upper/1e9) else "unbekannt")+
+                "\\n"+extensionReport(id)
             }
         }catch(e:Exception){"Hardwarebericht: "+e.message}
     }
