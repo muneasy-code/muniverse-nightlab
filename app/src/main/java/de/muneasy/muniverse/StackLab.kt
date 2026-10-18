@@ -140,8 +140,8 @@ object StackLab {
 
     private fun decodeSmall(context:Context, uri:Uri, targetW:Int=0,targetH:Int=0):Bitmap {
         val bounds=BitmapFactory.Options().apply{inJustDecodeBounds=true}
-        context.contentResolver.openInputStream(uri)?.use{BitmapFactory.decodeStream(it,null,bounds)}
-            ?:error("JPG-Datei nicht lesbar")
+        val inspect=context.contentResolver.openInputStream(uri)?:error("JPG-Datei nicht lesbar")
+        inspect.use{BitmapFactory.decodeStream(it,null,bounds)}
         require(bounds.outWidth>0 && bounds.outHeight>0){"Datei ist kein dekodierbares Foto."}
         val maxSide=1600
         var factor=1
