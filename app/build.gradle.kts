@@ -9,8 +9,8 @@ android {
   applicationId = "de.muneasy.muniverse"
   minSdk = 30
   targetSdk = 35
-  versionCode = 1
-  versionName = "0.1.0-alpha"
+  versionCode = 3
+  versionName = "0.1.3-alpha"
  }
  compileOptions {
   sourceCompatibility = JavaVersion.VERSION_17
