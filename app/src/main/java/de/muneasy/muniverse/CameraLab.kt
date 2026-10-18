@@ -14,6 +14,7 @@ import android.os.HandlerThread
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.view.Surface
+import android.view.WindowManager
 import android.view.TextureView
 import android.media.ToneGenerator
 import android.media.AudioManager
@@ -41,6 +42,27 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
     private var requestedIso=0
     private var autoExposure=false
     private var requestedAtMs=0L
+
+    fun limits():Pair<LongRange,IntRange>? {
+        val c=characteristics?:return null
+        val exposure=c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?:return null
+        val iso=c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)?:return null
+        return Pair(exposure.lower..exposure.upper,iso.lower..iso.upper)
+    }
+
+    private fun jpegOrientation(c:CameraCharacteristics):Int{
+        // Camera2 JPEG_ORIENTATION uses sensor mounting + device display orientation.
+        val sensor=c.get(CameraCharacteristics.SENSOR_ORIENTATION)?:90
+        val rotation=activity.windowManager.defaultDisplay.rotation
+        val degrees=when(rotation){
+            Surface.ROTATION_90->90
+            Surface.ROTATION_180->180
+            Surface.ROTATION_270->270
+            else->0
+        }
+        val front=c.get(CameraCharacteristics.LENS_FACING)==CameraCharacteristics.LENS_FACING_FRONT
+        return (sensor + (if(front) -degrees else degrees) + 360)%360
+    }
 
     fun exposureSupport():String {
         val c=characteristics ?: return "Camera2: noch nicht geöffnet"
@@ -194,6 +216,8 @@ class CameraLab(private val activity:Activity,private val tell:(String)->Unit) {
             raw?.surface?.let{request.addTarget(it)}
             request.set(CaptureRequest.CONTROL_MODE,CaptureRequest.CONTROL_MODE_AUTO)
             request.set(CaptureRequest.CONTROL_AWB_MODE,CaptureRequest.CONTROL_AWB_MODE_AUTO)
+            request.set(CaptureRequest.JPEG_ORIENTATION,jpegOrientation(ch))
+            request.set(CaptureRequest.JPEG_QUALITY,95.toByte())
             if(auto){
                 request.set(CaptureRequest.CONTROL_AE_MODE,CaptureRequest.CONTROL_AE_MODE_ON)
                 request.set(CaptureRequest.CONTROL_AF_MODE,CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
