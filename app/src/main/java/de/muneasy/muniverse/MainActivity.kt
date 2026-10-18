@@ -36,7 +36,7 @@ class MainActivity:Activity(){
     private var status:TextView?=null
     private var preview:TextureView?=null
     private var iso=800
-    private var seconds=5.0
+    private var seconds=0.10
     private val lat=52.12
     private val lon=11.63
     override fun onCreate(saved:Bundle?){
@@ -124,6 +124,7 @@ class MainActivity:Activity(){
             "mission"->{
                 title("DEINE FOTONACHT")
                 label("Himmelsziele · Magdeburg (offline)",14f,muted)
+                label("S23-Test bestätigt: Camera2 erlaubt hier maximal 0,15 s. Für echte lange Sternaufnahmen zunächst Samsung Expert RAW nutzen – mit dem Skyfinder die Ziele anpeilen.",13f,muted)
                 AstroMath.targets.forEachIndexed{index,t->
                     val p=AstroMath.position(t,lat,lon,System.currentTimeMillis())
                     val card=LinearLayout(this).apply{
@@ -178,7 +179,7 @@ class MainActivity:Activity(){
             }
             "camera"->{
                 title("ASTROCAM · CAMERA2")
-                label("v0.1.2: Wir messen jetzt die ECHTE Belichtungszeit des Sensors. Erst AUTO-TEST machen!",14f,muted)
+                label("v0.1.3 · S23-Lab: maximal 0,15 s gemessen. Hier testen wir RAW, manuelle ISO und kurze Einzelbelichtungen. Für Astro-Langzeit weiter Expert RAW.",14f,muted)
                 button("AUTO-TEST · helles Zimmer fotografieren"){
                     if(checkSelfPermission(Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED)camera.shootAuto()
                     else requestPermissions(arrayOf(Manifest.permission.CAMERA),100)
@@ -194,15 +195,19 @@ class MainActivity:Activity(){
                     override fun onSurfaceTextureUpdated(s:SurfaceTexture){}
                 }
                 status=label("Starte Kamera…",14f,cyan)
-                label("Wähle manuelle Belichtung. Die Camera2-Maximalzeit steht nach Kamerastart im Status.",13f,muted)
-                val isoSeek=SeekBar(this).apply{max=3100;progress=(iso-100).coerceIn(0,3100)}
+                label("Manueller Hardware-Test · echte Sekunden statt unzulässiger 30-s-Regler",13f,muted)
+                val isoSeek=SeekBar(this).apply{max=3150;progress=(iso-50).coerceIn(0,3150)}
                 content.addView(isoSeek)
                 val isoText=label("ISO "+iso)
-                isoSeek.setOnSeekBarChangeListener(listener {v->iso=(100+v).coerceAtLeast(100);isoText.text="ISO "+iso})
-                val expSeek=SeekBar(this).apply{max=29;progress=(seconds.toInt()-1).coerceIn(0,29)}
+                isoSeek.setOnSeekBarChangeListener(listener {v->iso=(50+v).coerceIn(50,3200);isoText.text="ISO "+iso})
+                // Tested Galaxy S23 Camera2 reports an upper exposure limit of 150 ms.
+                val expSeek=SeekBar(this).apply{max=149;progress=((seconds*1000).toInt()-1).coerceIn(0,149)}
                 content.addView(expSeek)
-                val secText=label("Belichtung "+seconds+" s")
-                expSeek.setOnSeekBarChangeListener(listener{v->seconds=v+1.0;secText.text="Belichtung "+seconds+" s"})
+                val secText=label("Belichtung "+String.format(Locale.GERMANY,"%.3f",seconds)+" s")
+                expSeek.setOnSeekBarChangeListener(listener{v->
+                    seconds=(v+1)/1000.0
+                    secText.text="Belichtung "+String.format(Locale.GERMANY,"%.3f",seconds)+" s"
+                })
                 button("MANUELL FOTOGRAFIEREN"){
                     if(checkSelfPermission(Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED)camera.shoot(iso,seconds)
                     else requestPermissions(arrayOf(Manifest.permission.CAMERA),100)
@@ -210,7 +215,7 @@ class MainActivity:Activity(){
                 if(checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED){
                     button("Kameraberechtigung erteilen"){requestPermissions(arrayOf(Manifest.permission.CAMERA),100)}
                 }
-                label("Nach der Aufnahme erscheinen die zurückgemeldeten Sensorwerte direkt im Status. Falls Camera2 deine Zeit nicht erlaubt, lösen wir absichtlich nicht aus. DNG nur mit RAW_SENSOR. Kein Expert-RAW-Stacking.",13f,muted)
+                label("Camera2-Einzelaufnahme: Die Sensorwerte nach dem Auslösen mit dem Wunschwert vergleichen. 0,15 s sind KEINE Expert-RAW-Langzeitbelichtung. Für schwache Sterne brauchen wir später Mehrfachaufnahmen mit Stacking.",13f,muted)
             }
         }
     }
